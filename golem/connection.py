@@ -143,6 +143,17 @@ class BridgeConnection:
         """Set a callback for unsolicited events (player_chat, block_placed, etc.)."""
         self._event_callback = callback
 
+    def send_event(self, event: str, data: dict[str, Any]) -> None:
+        """Send an event message to the bridge for relay to other clients.
+
+        Fire-and-forget — no response expected. Silently returns
+        if not connected.
+        """
+        if self._loop is None or self._ws is None:
+            return
+        msg = json.dumps({"type": "event", "event": event, "data": data})
+        asyncio.run_coroutine_threadsafe(self._ws.send(msg), self._loop)
+
     # --- internal async machinery ---
 
     def _run_loop(self, host: str, port: int) -> None:

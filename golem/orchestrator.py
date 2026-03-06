@@ -5,6 +5,7 @@ assembles world context, and coordinates code execution. Does NOT
 generate code, talk to the kid, or design challenges.
 """
 
+import ast as ast_module
 import asyncio
 import json
 import logging
@@ -18,7 +19,13 @@ from typing import Any
 import anthropic
 
 from .connection import get_connection
-from .learner import LearnerModel, LearnerEvent
+from .learner import (
+    CONCEPT_AST_MAPPING,
+    LearnerModel,
+    LearnerEvent,
+    _detect_concepts_in_code,
+)
+from .skills import SkillLibrary
 from .validator import validate, LEVEL_CONFIGS
 from . import sdk
 
@@ -114,6 +121,7 @@ class CodeResult:
     error_details: dict[str, Any] | None = None
     execution_time_seconds: float = 0.0
     infeasible_details: dict[str, Any] | None = None
+    modified: bool = False
 
 
 # ── Orchestrator ─────────────────────────────────────────────────────────────
@@ -128,6 +136,7 @@ class Orchestrator:
         bridge_port: int = 3001,
         prompt_dir: str = "prompts",
         learner_state_path: str = "data/learner_state.json",
+        skill_library_path: str = "data/skills.json",
         anthropic_client: anthropic.AsyncAnthropic | None = None,
     ) -> None:
         self._player_name = player_name
@@ -136,6 +145,7 @@ class Orchestrator:
         self._prompt_dir = Path(prompt_dir)
 
         self._learner = LearnerModel(player_name, learner_state_path)
+        self._skill_library = SkillLibrary(skill_library_path)
         self._client = anthropic_client or anthropic.AsyncAnthropic()
 
         # Load system prompts
@@ -157,6 +167,10 @@ class Orchestrator:
         self._recent_events: list[dict[str, Any]] = []
         self._event_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
         self._loop: asyncio.AbstractEventLoop | None = None
+
+        # Code panel tracking
+        self._last_displayed_code: str = ""
+        self._last_code_provenance: str = "bot"
 
         # Running state
         self._running = False
@@ -181,6 +195,7 @@ class Orchestrator:
         )
         self._session_start = time.monotonic()
         self._running = True
+        self._send_skills_list()
         self._challenge_task = asyncio.create_task(self._challenge_loop())
         await self._event_loop()
 
@@ -233,6 +248,12 @@ class Orchestrator:
                     self._game_mode = data.get("mode", "survival")
             elif event_name == "code_panel_run":
                 await self._handle_code_run(data)
+            elif event_name == "code_panel_edit":
+                await self._handle_code_edit(data)
+            elif event_name == "code_panel_scroll":
+                await self._handle_code_scroll(data)
+            elif event_name == "skills_query":
+                await self._handle_skills_query(data)
 
             if self._active_challenge:
                 await self._evaluate_challenge_triggers(event_name, data)
@@ -287,6 +308,8 @@ class Orchestrator:
             "max_nesting_depth": level_config["max_nesting_depth"],
         }
 
+        available_skills = self._get_filtered_skills(level)
+
         code = ""
         validation_errors: list[dict[str, Any]] | None = None
 
@@ -297,6 +320,7 @@ class Orchestrator:
                 constraints=constraints,
                 world_context=world_ctx,
                 retry_errors=validation_errors,
+                available_skills=available_skills,
             )
 
             if isinstance(code_response, dict) and code_response.get("status") == "infeasible":
@@ -338,11 +362,24 @@ class Orchestrator:
             await self._narrate_result(result, world_ctx)
             return
 
+        self._bridge_send_event("code_display", {"code": code})
+        self._last_displayed_code = code
+        self._last_code_provenance = "bot"
+
+        self._bridge_send_event("execution_start", {"code": code})
         result = await self._execute_code(code)
+        self._bridge_send_event("execution_complete", {
+            "status": result.status,
+            "execution_time_seconds": result.execution_time_seconds,
+            "error_details": result.error_details,
+        })
 
         if result.status in ("success", "partial"):
             self._learner.process_code_displayed(code)
             self._learner.save()
+            self._auto_save_skills(code, "bot")
+            self._record_skill_usage(code)
+            self._send_skills_list()
 
         await self._narrate_result(result, world_ctx)
 
@@ -427,26 +464,41 @@ class Orchestrator:
     async def _handle_code_run(self, data: dict[str, Any]) -> None:
         """Kid hit re-run in the code panel."""
         source = data.get("source", "")
+        modified = data.get("modified", False)
         if not source:
             return
 
         level = self._learner.get_current_level()
         validation = validate(source, level)
 
+        self._bridge_send_event("execution_start", {"code": source})
+
         if validation.valid:
             result = await self._execute_code(source)
-            if result.status == "success":
+            result.modified = modified
+            if result.status in ("success", "partial"):
                 self._learner.process_code_displayed(source)
                 self._learner.save()
+                provenance = "modified" if modified else self._last_code_provenance
+                self._auto_save_skills(source, provenance)
+                self._record_skill_usage(source)
+                self._send_skills_list()
         else:
             result = CodeResult(
                 status="error",
                 code_shown=source,
+                modified=modified,
                 error_details={
                     "type": "ValidationError",
                     "message": "; ".join(e.message for e in validation.errors),
                 },
             )
+
+        self._bridge_send_event("execution_complete", {
+            "status": result.status,
+            "execution_time_seconds": result.execution_time_seconds,
+            "error_details": result.error_details,
+        })
 
         world_ctx = await self._assemble_world_context()
         await self._narrate_result(result, world_ctx)
@@ -480,9 +532,11 @@ class Orchestrator:
         constraints: dict[str, Any],
         world_context: WorldContext,
         retry_errors: list[dict[str, Any]] | None = None,
+        available_skills: list[dict[str, Any]] | None = None,
     ) -> str | dict[str, Any]:
         user_content = self._build_code_user_message(
-            task, code_style, constraints, world_context, retry_errors
+            task, code_style, constraints, world_context, retry_errors,
+            available_skills,
         )
 
         response = await self._client.messages.create(
@@ -547,6 +601,8 @@ class Orchestrator:
                 "code_shown": code_result.code_shown,
                 "execution_time_seconds": code_result.execution_time_seconds,
             }
+            if code_result.modified:
+                rd["modified"] = True
             if code_result.error_details:
                 rd["error_details"] = code_result.error_details
             if code_result.infeasible_details:
@@ -575,6 +631,7 @@ class Orchestrator:
         constraints: dict[str, Any],
         world_context: WorldContext,
         retry_errors: list[dict[str, Any]] | None,
+        available_skills: list[dict[str, Any]] | None = None,
     ) -> str:
         parts: list[str] = []
         task_with_style = {**task, "code_style": code_style}
@@ -589,6 +646,11 @@ class Orchestrator:
             f"## World State\n```json\n"
             f"{json.dumps(world_context.to_code_dict(), indent=2)}\n```"
         )
+        if available_skills:
+            parts.append(
+                f"## Skill Library\n```json\n"
+                f'{json.dumps({"available_skills": available_skills}, indent=2)}\n```'
+            )
         if retry_errors:
             parts.append(
                 "## Previous Attempt Failed Validation\n"
@@ -945,7 +1007,183 @@ class Orchestrator:
             )
         self._learner.save()
 
+    # ── Skill Library ────────────────────────────────────────────────────────
+
+    def _get_filtered_skills(self, level: int) -> list[dict[str, Any]]:
+        """Return skills filtered by concept level, formatted for code agent."""
+        skills = self._skill_library.filter_by_level(level)
+        return [
+            {
+                "name": s.name,
+                "author": s.author,
+                "concepts": s.concepts,
+                "source": s.source,
+            }
+            for s in skills
+        ]
+
+    def _auto_save_skills(self, code: str, provenance: str) -> None:
+        """Detect function definitions in executed code and save as skills."""
+        try:
+            tree = ast_module.parse(code)
+        except SyntaxError:
+            return
+
+        for node in ast_module.walk(tree):
+            if isinstance(node, ast_module.FunctionDef) and node.end_lineno:
+                func_lines = code.split("\n")[node.lineno - 1 : node.end_lineno]
+                func_source = "\n".join(func_lines)
+                concepts = list(_detect_concepts_in_code(func_source))
+                description = ""
+                if (
+                    node.body
+                    and isinstance(node.body[0], ast_module.Expr)
+                    and isinstance(node.body[0].value, ast_module.Constant)
+                    and isinstance(node.body[0].value.value, str)
+                ):
+                    description = node.body[0].value.value
+                else:
+                    description = node.name.replace("_", " ")
+
+                self._skill_library.save_skill(
+                    name=node.name,
+                    source=func_source,
+                    description=description,
+                    concepts=concepts,
+                    author=provenance,
+                )
+
+    def _record_skill_usage(self, code: str) -> None:
+        """Record usage of any saved skills called in executed code."""
+        try:
+            tree = ast_module.parse(code)
+        except SyntaxError:
+            return
+
+        skill_names = {s.name for s in self._skill_library.list_all()}
+        for node in ast_module.walk(tree):
+            if (
+                isinstance(node, ast_module.Call)
+                and isinstance(node.func, ast_module.Name)
+                and node.func.id in skill_names
+            ):
+                self._skill_library.record_use(node.func.id)
+
+    def _send_skills_list(self) -> None:
+        """Send current skills list to the code panel."""
+        skills = self._skill_library.list_all()
+        skills_data = [
+            {
+                "name": s.name,
+                "description": s.description,
+                "author": s.author,
+                "concepts": s.concepts,
+                "source": s.source,
+                "times_used": s.times_used,
+            }
+            for s in skills
+        ]
+        self._bridge_send_event("skills_list", {"skills": skills_data})
+
+    async def _handle_skills_query(self, data: dict[str, Any]) -> None:
+        """Panel requested skills list."""
+        self._send_skills_list()
+
+    # ── Code Panel Event Handlers ─────────────────────────────────────────
+
+    async def _handle_code_edit(self, data: dict[str, Any]) -> None:
+        """Kid edited code in the panel. Diff and create learner events."""
+        new_code = data.get("source", "")
+        if not new_code or not self._last_displayed_code:
+            return
+
+        self._last_code_provenance = "modified"
+
+        old_lines = self._last_displayed_code.split("\n")
+        new_lines = new_code.split("\n")
+
+        changed_line_nums: set[int] = set()
+        for i, (old, new) in enumerate(zip(old_lines, new_lines)):
+            if old != new:
+                changed_line_nums.add(i + 1)
+        for i in range(len(old_lines), len(new_lines)):
+            changed_line_nums.add(i + 1)
+
+        if not changed_line_nums:
+            return
+
+        concepts = self._get_concepts_at_lines(new_code, changed_line_nums)
+
+        for concept in concepts:
+            event = LearnerEvent(
+                event="code_modified",
+                concept=concept,
+                detail="Code edited in panel",
+                context="code_editing",
+                success=True,
+                timestamp=datetime.now(timezone.utc),
+            )
+            self._learner.process_event(event)
+
+        if concepts:
+            self._learner.save()
+
+    async def _handle_code_scroll(self, data: dict[str, Any]) -> None:
+        """Kid scrolled through code. Create code_inspected learner events."""
+        if not self._last_displayed_code:
+            return
+
+        visible = data.get("visible_lines", {})
+        start = visible.get("start", 1)
+        end = visible.get("end", 1)
+
+        line_nums = set(range(start, end + 1))
+        concepts = self._get_concepts_at_lines(
+            self._last_displayed_code, line_nums
+        )
+
+        for concept in concepts:
+            event = LearnerEvent(
+                event="code_inspected",
+                concept=concept,
+                detail=f"Viewed lines {start}-{end}",
+                context="code_panel",
+                success=None,
+                timestamp=datetime.now(timezone.utc),
+            )
+            self._learner.process_event(event)
+
+        if concepts:
+            self._learner.save()
+
+    def _get_concepts_at_lines(
+        self, code: str, line_nums: set[int]
+    ) -> set[str]:
+        """Identify which concepts are present on the given line numbers."""
+        try:
+            tree = ast_module.parse(code)
+        except SyntaxError:
+            return set()
+
+        concepts: set[str] = set()
+        for node in ast_module.walk(tree):
+            if not hasattr(node, "lineno") or node.lineno not in line_nums:
+                continue
+            node_type = type(node).__name__
+            for concept, ast_nodes in CONCEPT_AST_MAPPING.items():
+                if node_type in ast_nodes:
+                    concepts.add(concept)
+        return concepts
+
     # ── Bridge Helpers ───────────────────────────────────────────────────────
+
+    def _bridge_send_event(self, event: str, data: dict[str, Any]) -> None:
+        """Send an event through the bridge to other clients (code panel)."""
+        try:
+            conn = get_connection()
+            conn.send_event(event, data)
+        except Exception:
+            pass
 
     async def _bridge_say(self, message: str) -> None:
         conn = get_connection()

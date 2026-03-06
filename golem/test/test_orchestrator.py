@@ -30,6 +30,7 @@ from golem.orchestrator import (
     WorldContext,
 )
 from golem.learner import LearnerModel, LearnerEvent
+from golem.skills import SkillLibrary
 from golem.validator import LEVEL_CONFIGS
 
 
@@ -192,11 +193,13 @@ def orchestrator(
 ) -> Orchestrator:
     """Create an orchestrator with mocked dependencies."""
     learner_path = str(tmp_path / "learner_state.json")
+    skill_path = str(tmp_path / "skills.json")
     with patch("golem.orchestrator.get_connection", return_value=mock_bridge_conn):
         orch = Orchestrator(
             player_name="Alex",
             prompt_dir=str(tmp_prompts),
             learner_state_path=learner_path,
+            skill_library_path=skill_path,
             anthropic_client=mock_anthropic_client,
         )
     orch._session_start = time.monotonic()
@@ -1077,3 +1080,455 @@ class TestDirectivePassing:
         call_kwargs = mock_anthropic_client.messages.create.call_args
         user_msg = call_kwargs.kwargs["messages"][0]["content"]
         assert "Challenge Directive" not in user_msg
+
+
+# ── Test: Skill Library Integration ──────────────────────────────────────
+
+
+LEVEL3_CODE_WITH_FUNCTION = '''from golem import *
+
+def build_tower(x, y, z, height):
+    """Build a tower at the given position."""
+    block = "cobblestone"
+    for i in range(height):
+        place_block(x, y + i, z, block)
+
+build_tower(10, 64, 20, 5)
+'''
+
+
+class TestSkillLibraryWiring:
+    """Skill library integration with the orchestrator."""
+
+    def test_skill_library_initialized(self, orchestrator: Orchestrator) -> None:
+        assert orchestrator._skill_library is not None
+        assert isinstance(orchestrator._skill_library, SkillLibrary)
+
+    def test_get_filtered_skills_empty(self, orchestrator: Orchestrator) -> None:
+        result = orchestrator._get_filtered_skills(1)
+        assert result == []
+
+    def test_get_filtered_skills_returns_formatted(
+        self, orchestrator: Orchestrator
+    ) -> None:
+        orchestrator._skill_library.save_skill(
+            name="test_skill",
+            source="def test_skill(): pass",
+            description="A test",
+            concepts=["variables"],
+            author="bot",
+        )
+        result = orchestrator._get_filtered_skills(1)
+        assert len(result) == 1
+        assert result[0]["name"] == "test_skill"
+        assert result[0]["author"] == "bot"
+        assert "source" in result[0]
+
+    def test_get_filtered_skills_respects_level(
+        self, orchestrator: Orchestrator
+    ) -> None:
+        orchestrator._skill_library.save_skill(
+            name="loop_skill",
+            source="def loop_skill(): pass",
+            description="Uses loops",
+            concepts=["for_loops"],
+            author="bot",
+        )
+        # Level 1 should NOT include for_loops skills
+        assert orchestrator._get_filtered_skills(1) == []
+        # Level 2 should include them
+        assert len(orchestrator._get_filtered_skills(2)) == 1
+
+    @pytest.mark.asyncio
+    async def test_skills_in_code_agent_call(
+        self, orchestrator: Orchestrator, mock_anthropic_client: AsyncMock,
+        mock_bridge_conn: MagicMock,
+    ) -> None:
+        """Filtered skills are passed to the code agent."""
+        orchestrator._skill_library.save_skill(
+            name="my_wall",
+            source="def my_wall(): pass",
+            description="Builds a wall",
+            concepts=["variables"],
+            author="bot",
+        )
+
+        task = {"intent": "build wall", "player_name": "Alex"}
+        mock_anthropic_client.messages.create.side_effect = [
+            make_chat_response(chat_messages=["On it!"], task_description=task),
+            make_code_response(VALID_LEVEL1_CODE),
+            make_chat_response(chat_messages=["Done!"]),
+        ]
+
+        with patch("golem.orchestrator.get_connection", return_value=mock_bridge_conn):
+            await orchestrator.handle_player_chat("build a wall")
+
+        code_call = mock_anthropic_client.messages.create.call_args_list[1]
+        user_msg = code_call.kwargs["messages"][0]["content"]
+        assert "Skill Library" in user_msg
+        assert "my_wall" in user_msg
+
+    def test_auto_save_skills_detects_function(
+        self, orchestrator: Orchestrator
+    ) -> None:
+        """Function definitions in code are auto-saved as skills."""
+        code = '''def build_tower(x, y, z, height):
+    """Build a tower."""
+    block = "cobblestone"
+'''
+        orchestrator._auto_save_skills(code, "bot")
+
+        skill = orchestrator._skill_library.get_skill("build_tower")
+        assert skill is not None
+        assert skill.author == "bot"
+        assert skill.description == "Build a tower."
+        assert "def build_tower" in skill.source
+
+    def test_auto_save_skills_no_function(
+        self, orchestrator: Orchestrator
+    ) -> None:
+        """Code without function definitions doesn't save anything."""
+        orchestrator._auto_save_skills(VALID_LEVEL1_CODE, "bot")
+        assert orchestrator._skill_library.list_all() == []
+
+    def test_auto_save_skills_modified_provenance(
+        self, orchestrator: Orchestrator
+    ) -> None:
+        code = 'def my_func():\n    x = 1\n'
+        orchestrator._auto_save_skills(code, "modified")
+        skill = orchestrator._skill_library.get_skill("my_func")
+        assert skill is not None
+        assert skill.author == "modified"
+
+    def test_record_skill_usage(self, orchestrator: Orchestrator) -> None:
+        orchestrator._skill_library.save_skill(
+            name="my_helper",
+            source="def my_helper(): pass",
+            description="A helper",
+            concepts=["variables"],
+            author="bot",
+        )
+        code = 'from golem import *\nmy_helper()\n'
+        orchestrator._record_skill_usage(code)
+
+        skill = orchestrator._skill_library.get_skill("my_helper")
+        assert skill is not None
+        assert skill.times_used == 1
+
+    def test_record_skill_usage_no_match(
+        self, orchestrator: Orchestrator
+    ) -> None:
+        """Calling a non-skill function doesn't record usage."""
+        orchestrator._skill_library.save_skill(
+            name="my_helper",
+            source="def my_helper(): pass",
+            description="A helper",
+            concepts=["variables"],
+            author="bot",
+        )
+        code = 'from golem import *\nother_func()\n'
+        orchestrator._record_skill_usage(code)
+
+        skill = orchestrator._skill_library.get_skill("my_helper")
+        assert skill is not None
+        assert skill.times_used == 0
+
+    def test_send_skills_list(
+        self, orchestrator: Orchestrator, mock_bridge_conn: MagicMock
+    ) -> None:
+        orchestrator._skill_library.save_skill(
+            name="test_skill",
+            source="def test_skill(): pass",
+            description="A test",
+            concepts=["variables"],
+            author="bot",
+        )
+        with patch("golem.orchestrator.get_connection", return_value=mock_bridge_conn):
+            orchestrator._send_skills_list()
+
+        mock_bridge_conn.send_event.assert_called_once()
+        call_args = mock_bridge_conn.send_event.call_args
+        assert call_args[0][0] == "skills_list"
+        assert len(call_args[0][1]["skills"]) == 1
+        assert call_args[0][1]["skills"][0]["name"] == "test_skill"
+
+
+# ── Test: Code Panel Events ──────────────────────────────────────────────
+
+
+class TestCodePanelEvents:
+    """Code display, edit, scroll, and run events."""
+
+    @pytest.mark.asyncio
+    async def test_code_display_sent_on_task(
+        self, orchestrator: Orchestrator, mock_anthropic_client: AsyncMock,
+        mock_bridge_conn: MagicMock,
+    ) -> None:
+        """code_display event is sent after valid code is generated."""
+        task = {"intent": "build", "player_name": "Alex"}
+        mock_anthropic_client.messages.create.side_effect = [
+            make_chat_response(chat_messages=["On it!"], task_description=task),
+            make_code_response(VALID_LEVEL1_CODE_PURE),
+            make_chat_response(chat_messages=["Done!"]),
+        ]
+
+        with patch("golem.orchestrator.get_connection", return_value=mock_bridge_conn):
+            await orchestrator.handle_player_chat("build something")
+
+        send_event_calls = mock_bridge_conn.send_event.call_args_list
+        event_names = [c[0][0] for c in send_event_calls]
+        assert "code_display" in event_names
+        assert "execution_start" in event_names
+        assert "execution_complete" in event_names
+
+        # code_display should contain the code
+        display_call = next(c for c in send_event_calls if c[0][0] == "code_display")
+        assert VALID_LEVEL1_CODE_PURE.strip() in display_call[0][1]["code"]
+
+    @pytest.mark.asyncio
+    async def test_last_displayed_code_tracked(
+        self, orchestrator: Orchestrator, mock_anthropic_client: AsyncMock,
+        mock_bridge_conn: MagicMock,
+    ) -> None:
+        task = {"intent": "build", "player_name": "Alex"}
+        mock_anthropic_client.messages.create.side_effect = [
+            make_chat_response(chat_messages=["On it!"], task_description=task),
+            make_code_response(VALID_LEVEL1_CODE_PURE),
+            make_chat_response(chat_messages=["Done!"]),
+        ]
+
+        with patch("golem.orchestrator.get_connection", return_value=mock_bridge_conn):
+            await orchestrator.handle_player_chat("build")
+
+        assert orchestrator._last_displayed_code != ""
+        assert orchestrator._last_code_provenance == "bot"
+
+    @pytest.mark.asyncio
+    async def test_handle_code_edit_creates_learner_events(
+        self, orchestrator: Orchestrator
+    ) -> None:
+        """Editing code creates code_modified learner events."""
+        orchestrator._last_displayed_code = '''from golem import *
+
+block = "cobblestone"
+height = 5
+'''
+        new_code = '''from golem import *
+
+block = "oak_planks"
+height = 5
+'''
+        await orchestrator._handle_code_edit({"source": new_code})
+
+        assert orchestrator._last_code_provenance == "modified"
+        # The changed line has an Assign (variables concept)
+        state = orchestrator._learner.get_agent_state()
+        assert state["concepts"]["variables"]["stage"] != "none" or \
+               state["concepts"]["variables"]["p_mastery"] > 0
+
+    @pytest.mark.asyncio
+    async def test_handle_code_edit_no_change(
+        self, orchestrator: Orchestrator
+    ) -> None:
+        """No events if code didn't actually change."""
+        code = 'from golem import *\nblock = "stone"\n'
+        orchestrator._last_displayed_code = code
+        original_provenance = orchestrator._last_code_provenance
+
+        await orchestrator._handle_code_edit({"source": code})
+        # Provenance should still be set to modified since edit was attempted
+        # but no learner events since no lines changed
+
+    @pytest.mark.asyncio
+    async def test_handle_code_edit_no_previous_code(
+        self, orchestrator: Orchestrator
+    ) -> None:
+        """No events if there's no previously displayed code."""
+        orchestrator._last_displayed_code = ""
+        await orchestrator._handle_code_edit({"source": "x = 1"})
+        # Should silently return
+
+    @pytest.mark.asyncio
+    async def test_handle_code_scroll_creates_inspected_events(
+        self, orchestrator: Orchestrator
+    ) -> None:
+        """Scrolling creates code_inspected events for visible concepts."""
+        orchestrator._last_displayed_code = '''from golem import *
+
+block = "cobblestone"
+height = 5
+x = 10
+'''
+        await orchestrator._handle_code_scroll({
+            "visible_lines": {"start": 3, "end": 5}
+        })
+
+        state = orchestrator._learner.get_agent_state()
+        # Lines 3-5 have Assign nodes → variables concept
+        assert state["concepts"]["variables"]["stage"] == "read"
+
+    @pytest.mark.asyncio
+    async def test_handle_code_scroll_no_displayed_code(
+        self, orchestrator: Orchestrator
+    ) -> None:
+        """No events if no code is displayed."""
+        orchestrator._last_displayed_code = ""
+        await orchestrator._handle_code_scroll({
+            "visible_lines": {"start": 1, "end": 10}
+        })
+        # Should silently return
+
+    @pytest.mark.asyncio
+    async def test_handle_code_run_sends_execution_events(
+        self, orchestrator: Orchestrator, mock_bridge_conn: MagicMock
+    ) -> None:
+        """Re-running code sends execution_start and execution_complete."""
+        with patch("golem.orchestrator.get_connection", return_value=mock_bridge_conn):
+            # Mock the narration call
+            orchestrator._client.messages.create = AsyncMock(
+                return_value=make_chat_response(chat_messages=["Ran it!"])
+            )
+            await orchestrator._handle_code_run({
+                "source": VALID_LEVEL1_CODE_PURE,
+                "modified": False,
+            })
+
+        event_names = [c[0][0] for c in mock_bridge_conn.send_event.call_args_list]
+        assert "execution_start" in event_names
+        assert "execution_complete" in event_names
+
+    @pytest.mark.asyncio
+    async def test_handle_code_run_modified_flag(
+        self, orchestrator: Orchestrator, mock_bridge_conn: MagicMock
+    ) -> None:
+        """Modified flag is passed through to narration."""
+        with patch("golem.orchestrator.get_connection", return_value=mock_bridge_conn):
+            orchestrator._client.messages.create = AsyncMock(
+                return_value=make_chat_response(chat_messages=["Done!"])
+            )
+            await orchestrator._handle_code_run({
+                "source": VALID_LEVEL1_CODE_PURE,
+                "modified": True,
+            })
+
+        # The narration call should include the modified flag
+        narration_call = orchestrator._client.messages.create.call_args
+        user_msg = narration_call.kwargs["messages"][0]["content"]
+        assert '"modified": true' in user_msg
+
+    @pytest.mark.asyncio
+    async def test_handle_code_run_saves_skills(
+        self, orchestrator: Orchestrator, mock_bridge_conn: MagicMock
+    ) -> None:
+        """Successful re-run with function defs saves skills."""
+        code_with_func = '''from golem import *
+
+def make_label(name):
+    label = "bot_" + name
+    return label
+
+result = make_label("Alex")
+'''
+        # Mock validation to pass (function defs require level 3+)
+        mock_valid = MagicMock()
+        mock_valid.valid = True
+
+        with patch("golem.orchestrator.get_connection", return_value=mock_bridge_conn), \
+             patch("golem.orchestrator.validate", return_value=mock_valid):
+            orchestrator._client.messages.create = AsyncMock(
+                return_value=make_chat_response(chat_messages=["Done!"])
+            )
+            await orchestrator._handle_code_run({
+                "source": code_with_func,
+                "modified": True,
+            })
+
+        skill = orchestrator._skill_library.get_skill("make_label")
+        assert skill is not None
+        assert skill.author == "modified"
+
+    @pytest.mark.asyncio
+    async def test_handle_skills_query(
+        self, orchestrator: Orchestrator, mock_bridge_conn: MagicMock
+    ) -> None:
+        """skills_query event triggers skills_list response."""
+        orchestrator._skill_library.save_skill(
+            name="test_skill",
+            source="def test_skill(): pass",
+            description="Test",
+            concepts=["variables"],
+            author="bot",
+        )
+        with patch("golem.orchestrator.get_connection", return_value=mock_bridge_conn):
+            await orchestrator._handle_skills_query({})
+
+        mock_bridge_conn.send_event.assert_called_once()
+        assert mock_bridge_conn.send_event.call_args[0][0] == "skills_list"
+
+    def test_get_concepts_at_lines(self, orchestrator: Orchestrator) -> None:
+        """Concept detection at specific lines."""
+        code = '''from golem import *
+
+block = "cobblestone"
+for i in range(5):
+    place_block(i, 64, 0, block)
+'''
+        # Line 3: Assign → variables
+        concepts_3 = orchestrator._get_concepts_at_lines(code, {3})
+        assert "variables" in concepts_3
+
+        # Line 4: For → for_loops
+        concepts_4 = orchestrator._get_concepts_at_lines(code, {4})
+        assert "for_loops" in concepts_4
+
+        # Line 5: Call → function_calls
+        concepts_5 = orchestrator._get_concepts_at_lines(code, {5})
+        assert "function_calls" in concepts_5
+
+    def test_get_concepts_at_lines_syntax_error(
+        self, orchestrator: Orchestrator
+    ) -> None:
+        """Invalid syntax returns empty set."""
+        assert orchestrator._get_concepts_at_lines("def :", {1}) == set()
+
+    @pytest.mark.asyncio
+    async def test_execution_events_on_task_success(
+        self, orchestrator: Orchestrator, mock_anthropic_client: AsyncMock,
+        mock_bridge_conn: MagicMock,
+    ) -> None:
+        """Execution events sent in correct order during task."""
+        task = {"intent": "test", "player_name": "Alex"}
+        mock_anthropic_client.messages.create.side_effect = [
+            make_chat_response(chat_messages=["On it!"], task_description=task),
+            make_code_response(VALID_LEVEL1_CODE_PURE),
+            make_chat_response(chat_messages=["Done!"]),
+        ]
+
+        with patch("golem.orchestrator.get_connection", return_value=mock_bridge_conn):
+            await orchestrator.handle_player_chat("do it")
+
+        event_calls = mock_bridge_conn.send_event.call_args_list
+        event_names = [c[0][0] for c in event_calls]
+
+        # Order: code_display, execution_start, execution_complete, skills_list
+        assert event_names.index("code_display") < event_names.index("execution_start")
+        assert event_names.index("execution_start") < event_names.index("execution_complete")
+
+    @pytest.mark.asyncio
+    async def test_skills_list_sent_after_execution(
+        self, orchestrator: Orchestrator, mock_anthropic_client: AsyncMock,
+        mock_bridge_conn: MagicMock,
+    ) -> None:
+        """skills_list event is sent after successful code execution."""
+        task = {"intent": "test", "player_name": "Alex"}
+        mock_anthropic_client.messages.create.side_effect = [
+            make_chat_response(chat_messages=["On it!"], task_description=task),
+            make_code_response(VALID_LEVEL1_CODE_PURE),
+            make_chat_response(chat_messages=["Done!"]),
+        ]
+
+        with patch("golem.orchestrator.get_connection", return_value=mock_bridge_conn):
+            await orchestrator.handle_player_chat("do it")
+
+        event_names = [c[0][0] for c in mock_bridge_conn.send_event.call_args_list]
+        assert "skills_list" in event_names
