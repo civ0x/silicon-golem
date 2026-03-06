@@ -182,3 +182,30 @@ The project needed a name that communicates the core relationship dynamic, reson
 - **Correct power dynamic.** Golems serve their creator. The kid is the builder; the golem is the capable but directed helper. This matches the "kid as boss, bot as apprentice" design principle.
 - **Silicon signals the computational layer.** It distinguishes this from the in-game entity while making the metaphor explicit: this golem is made of silicon (computation) rather than iron (blocks).
 - **Works technically.** `silicon-golem` as repo name, `golem` as CLI command, "my golem" as what the kid says.
+
+---
+
+## ADR-007: Visual Block Editor — Not Building (v1)
+
+**Status:** Parked
+**Date:** 2026-03-05
+
+### Context
+
+A visual block programming interface modeled on Minecraft's crafting table — where code blocks are arranged like crafting ingredients to compose programs — would provide an alternative entry point for kids who can't type fluently. The crafting-grid metaphor maps construct composition to a familiar game mechanic: arrange known primitives in a pattern → produce a new capability, exactly like crafting recipes.
+
+### Decision
+
+Not building for v1. The chat-first interface with visible code is the core interaction to validate. The crafting-grid editor is a substantial front-end project (likely Blockly-based) that would delay the core learning loop validation.
+
+### Revisit Triggers
+
+- Evidence that typing speed is a significant barrier for the target age group (9-12)
+- Evidence that the code panel's text display is insufficient for code comprehension at Level 1-2
+- Successful validation of the core learning loop (kids do transition from Director → Modifier)
+
+### Prior Art to Study If Revisiting
+
+- Minecraft Education Edition's Code Builder (MakeCode/Blockly → JavaScript → Python)
+- The "Scratch ceiling" literature on block-to-text transitions
+- Alrubaye et al. (2019): hybrid viewing (blocks + text side by side) improved transfer by >30%
