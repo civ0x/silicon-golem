@@ -456,13 +456,15 @@
   const skillsList = document.getElementById('skillsList');
 
   // --- Tabs ---
+  function switchTab(panelName) {
+    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+    document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+    document.querySelector('[data-panel="' + panelName + '"]').classList.add('active');
+    document.getElementById('panel-' + panelName).classList.add('active');
+  }
+
   document.querySelectorAll('.tab').forEach(tab => {
-    tab.addEventListener('click', () => {
-      document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
-      document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
-      tab.classList.add('active');
-      document.getElementById('panel-' + tab.dataset.panel).classList.add('active');
-    });
+    tab.addEventListener('click', () => switchTab(tab.dataset.panel));
   });
 
   // --- WebSocket ---
@@ -554,20 +556,21 @@
 
     codeTextarea.value = code;
     updateHighlight(code);
-    updateLineNumbers(code);
-    syncHeight();
+    updateLineNumbers(code.split('\n').length);
   }
 
   function updateHighlight(code) {
     const highlighted = Prism.highlight(code, Prism.languages.python, 'python');
     // Mark "knob" lines — simple assignments near the top (after import)
     const lines = highlighted.split('\n');
+    const rawLines = code.split('\n');
     const result = [];
     let pastImport = false;
     let knobZone = true;
+    const knobRe = /^[a-zA-Z_]\w*\s*=\s*/;
 
     for (let i = 0; i < lines.length; i++) {
-      const rawLine = code.split('\n')[i] || '';
+      const rawLine = rawLines[i] || '';
       const trimmed = rawLine.trim();
 
       if (trimmed.startsWith('from ') || trimmed.startsWith('import ')) {
@@ -583,7 +586,7 @@
           continue;
         }
         // Simple assignment: name = value (no dots, no calls on left side)
-        if (/^[a-zA-Z_]\w*\s*=\s*/.test(trimmed) && !trimmed.includes('(')) {
+        if (knobRe.test(trimmed) && !trimmed.includes('(')) {
           result.push('<span class="knob-line">' + lines[i] + '</span>');
           continue;
         }
@@ -596,17 +599,17 @@
     codeHighlight.innerHTML = result.join('\n');
   }
 
-  function updateLineNumbers(code) {
-    const count = code.split('\n').length;
+  let lastLineCount = 0;
+
+  function updateLineNumbers(count) {
+    if (count === lastLineCount) return;
+    lastLineCount = count;
     let html = '';
     for (let i = 1; i <= count; i++) {
       html += i + '\n';
     }
     lineNumbers.textContent = html;
-  }
-
-  function syncHeight() {
-    // Ensure textarea is tall enough for its content
+    // Only reflow when line count changes
     codeTextarea.style.height = 'auto';
     codeTextarea.style.height = codeTextarea.scrollHeight + 'px';
   }
@@ -615,8 +618,7 @@
   codeTextarea.addEventListener('input', () => {
     const code = codeTextarea.value;
     updateHighlight(code);
-    updateLineNumbers(code);
-    syncHeight();
+    updateLineNumbers(code.split('\n').length);
     emitEditEvent(code);
   });
 
@@ -686,6 +688,13 @@
   });
 
   // --- Run ---
+  function setRunningState() {
+    isRunning = true;
+    runBtn.disabled = true;
+    runStatus.textContent = 'running...';
+    runStatus.className = 'run-status running';
+  }
+
   runBtn.addEventListener('click', () => {
     if (isRunning || !connected) return;
 
@@ -701,10 +710,7 @@
       }
     });
 
-    isRunning = true;
-    runBtn.disabled = true;
-    runStatus.textContent = 'running...';
-    runStatus.className = 'run-status running';
+    setRunningState();
 
     addLogEntry({
       action: 'Run' + (code !== currentCode ? ' (modified)' : ''),
@@ -715,10 +721,7 @@
 
   // --- Execution events from orchestrator ---
   function onExecutionStart(data) {
-    isRunning = true;
-    runBtn.disabled = true;
-    runStatus.textContent = 'running...';
-    runStatus.className = 'run-status running';
+    setRunningState();
   }
 
   function onExecutionComplete(data) {
@@ -749,6 +752,7 @@
       (info.detail ? '<div class="log-detail">' + escapeHtml(info.detail) + '</div>' : '');
 
     logList.appendChild(entry);
+    while (logList.children.length > 100) logList.removeChild(logList.firstChild);
     logList.scrollTop = logList.scrollHeight;
   }
 
@@ -780,27 +784,23 @@
     skills.forEach(skill => {
       const card = document.createElement('div');
       card.className = 'skill-card';
+      const authorClass = {kid: 'kid', bot: 'bot', modified: 'bot'}[skill.author] || 'bot';
+      const authorLabel = skill.author === 'kid' ? 'yours' : skill.author === 'modified' ? 'modified by you' : 'golem';
       card.innerHTML =
         '<div class="skill-name">' + escapeHtml(skill.name) + '</div>' +
         '<div class="skill-desc">' + escapeHtml(skill.description || '') + '</div>' +
         '<div class="skill-meta">' +
-          '<span class="skill-author ' + (skill.author || 'bot') + '">' +
-            (skill.author === 'kid' ? 'yours' : skill.author === 'modified' ? 'modified by you' : 'golem') +
-          '</span>' +
-          (skill.times_used ? '<span>used ' + skill.times_used + 'x</span>' : '') +
+          '<span class="skill-author ' + authorClass + '">' + escapeHtml(authorLabel) + '</span>' +
+          (skill.times_used ? '<span>used ' + escapeHtml(String(skill.times_used)) + 'x</span>' : '') +
         '</div>';
 
       card.addEventListener('click', () => {
         if (skill.source) {
-          showCode(skill.source);
           currentCode = skill.source;
           lastSentCode = skill.source;
+          showCode(skill.source);
           runBtn.disabled = false;
-          // Switch to code tab
-          document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
-          document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
-          document.querySelector('[data-panel="code"]').classList.add('active');
-          document.getElementById('panel-code').classList.add('active');
+          switchTab('code');
         }
       });
 
