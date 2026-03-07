@@ -69,7 +69,7 @@ Strategy selection depends on the kid's current phase. Phase 1-2 kids should see
 
 ## ADR-003: Agent Topology and Model Allocation
 
-**Status:** Proposed
+**Status:** Accepted
 **Date:** 2026-03-05
 
 ### Context
@@ -102,7 +102,7 @@ For building the system itself, apply the Cherny fleet pattern:
 
 ## ADR-004: Verification Architecture
 
-**Status:** Proposed
+**Status:** Accepted
 **Date:** 2026-03-05
 
 ### Context

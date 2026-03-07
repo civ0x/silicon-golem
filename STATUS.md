@@ -2,8 +2,8 @@
 
 ## Current State
 
-**Phase:** Implementation — integration
-**Date:** 2026-03-05
+**Phase:** Implementation — smoke testing
+**Date:** 2026-03-07
 
 ### Completed
 
@@ -17,12 +17,12 @@
 - **Mineflayer Bridge** (`bridge/`) — server.js (323 lines), actions.js (1057 lines), events.js (274 lines), 378 lines of integration tests. All 15 primitives + 3 compounds + 12 event types + 2 queries. All 19 error codes mapped. Protocol-compliant.
 - **Python SDK** (`golem/sdk.py`, `golem/connection.py`, `golem/errors.py`) — 18 SDK functions + Position/Item types, synchronous API over async internals, error translation, progress callbacks, 72 tests passing.
 - **Learner model** (`golem/learner.py`) — 290 lines. LearnerModel class with all 6 spec methods. BKT forward algorithm, 7-stage progression with skip-forward semantics, concept-to-AST mapping, 16-concept registry with prerequisite chains, JSON persistence. 83 tests passing.
-
 - **Orchestrator** (`golem/orchestrator.py`) — 520 lines. Central coordinator: message routing (chat → code → execute → narrate), challenge state machine (kishōtenketsu beats with trigger evaluation), world context assembly, code execution pipeline with AST validation retry loop, sandboxed exec with restricted builtins, Claude API integration (Haiku/Sonnet/Opus). 62 tests passing.
+- **Dev environment verified** (2026-03-07) — Python 3.13.5, Node 25.8.0, all dependencies installed (websockets, anthropic, mineflayer, ws). 308 Python tests passing, 59 skipped (integration). Bridge tests require live MC server (expected).
 
 ### In Progress
 
-Nothing currently in progress — ready for next batch.
+- **Smoke testing** — verifying full chain end-to-end against a live Minecraft 1.20.4 server.
 
 ### Next Up
 
@@ -32,7 +32,7 @@ Nothing currently in progress — ready for next batch.
 
 ### Blocked
 
-- Nothing currently blocked
+- **Bridge integration tests** — need a running Minecraft 1.20.4 server (LAN or dedicated) for the bridge to connect to. All 25 bridge tests fail with ECONNREFUSED without one.
 
 ### Cleanup
 
