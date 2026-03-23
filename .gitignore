@@ -1,4 +1,27 @@
+# Python
 __pycache__/
 *.pyc
-.DS_Store
+*.pyo
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Node
 node_modules/
+bridge/node_modules/
+
+# Environment
+.env
+.env.local
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Claude Code
+.claude/

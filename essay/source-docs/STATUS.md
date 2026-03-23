@@ -3,7 +3,7 @@
 ## Current State
 
 **Phase:** System complete — ready for smoke test
-**Date:** 2026-03-07
+**Date:** 2026-03-05
 
 ### Completed
 
@@ -36,6 +36,7 @@
 
 - **End-to-end smoke test** — start MC 1.20.4 server + bridge + orchestrator + code panel, connect a Minecraft client, verify the full loop: chat → code generation → execution → world change → code panel display → kid edits → re-run
 - **Run integration tests** against live MC server (33 tests currently skipping)
+- **Anthropic API key** — orchestrator needs ANTHROPIC_API_KEY env var for chat/code/challenge agent calls
 
 ### Cleanup
 

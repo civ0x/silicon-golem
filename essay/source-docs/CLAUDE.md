@@ -1,6 +1,4 @@
-# CLAUDE.md
-
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+# Silicon Golem — CLAUDE.md
 
 ## What This Project Is
 
@@ -8,68 +6,13 @@ Silicon Golem is an AI companion system for Minecraft that teaches a child Pytho
 
 The system is not an IDE, not a MOOC, not a tutoring chatbot. It is an apprenticeship inversion: the kid is the master, the AI is the capable-but-directed helper who happens to be better at typing.
 
-## Build & Test Commands
-
-### Python (golem/)
-
-Dependencies: `anthropic`, `websockets`, `pytest` (test only). Python 3.11+.
-
-```bash
-# Install dependencies (no requirements.txt yet — install manually)
-pip install anthropic websockets pytest
-
-# Run all Python tests (~314 tests)
-python -m pytest golem/test/ -v
-
-# Run a single test file
-python -m pytest golem/test/test_validator.py -v
-
-# Run a single test
-python -m pytest golem/test/test_validator.py::TestLevelConstraints::test_max_lines_constraint -v
-
-# Integration tests (require live MC 1.20.4 server + bridge running)
-INTEGRATION_PLAYER=YourName python -m pytest golem/test/test_integration.py -v
-```
-
-### Node.js (bridge/)
-
-```bash
-cd bridge && npm install   # Install dependencies (once)
-npm start                  # Start Mineflayer bot + WebSocket server on port 3001
-npm test                   # Run bridge tests (requires MC server)
-```
-
-### Code Panel (panel/)
-
-Open `panel/index.html` in a browser. No build step. Connects to bridge WebSocket on port 3001.
-
-### Environment Variables
-
-| Variable | Used by | Default | Purpose |
-|----------|---------|---------|---------|
-| `ANTHROPIC_API_KEY` | orchestrator | (required) | Claude API access |
-| `MC_HOST` | bridge, integration tests | `localhost` | Minecraft server host |
-| `MC_PORT` | bridge, integration tests | `25565` | Minecraft server port |
-| `WS_PORT` | bridge | `3001` | Bridge WebSocket port |
-| `BOT_NAME` | bridge | `Golem` | Bot's Minecraft username |
-| `INTEGRATION_PLAYER` | integration tests | (required) | Player name to track |
-
-### Full System Startup (for smoke testing)
-
-1. Start Minecraft Java Edition 1.20.4, open to LAN
-2. `cd bridge && npm start` — bot joins the world
-3. Start orchestrator (no standalone entry point yet — needs `__main__.py`)
-4. Open `panel/index.html` in browser
-
 ## Read These First
 
 Before working on any task, read the relevant design docs:
 
 - **DECISIONS.md** — Accepted architectural decisions (ADR-001 through ADR-007). These are binding constraints. Don't contradict them without explicit discussion.
 - **GOLEM_SDK.md** — The Python API surface the kid sees. Defines SDK functions, concept allowlists per level, generated code patterns, and a full challenge scenario walkthrough. This is the keystone artifact — code generation, AST validation, and challenge design all derive from it.
-- **BRIDGE_PROTOCOL.md** — WebSocket message protocol between Python orchestrator and Mineflayer bridge.
-- **LEARNER_MODEL.md** — BKT model spec, concept registry, learner event taxonomy.
-- **STATUS.md** — Current project state. What's built, what's next, what's blocked.
+- **STATUS.md** — Current project state (create this when implementation begins). What's built, what's next, what's blocked.
 
 ## Architecture Overview
 
@@ -89,14 +32,34 @@ The kid sees: Minecraft + a code panel (web UI) showing the bot's generated Pyth
 
 ## Orchestrator Routing Responsibilities
 
-The orchestrator (`golem/orchestrator.py`) is the central coordinator — it owns all data flow between agents but does not generate code, talk to the kid, or design challenges. Key responsibilities:
+The Python orchestrator is the central coordinator. It does not generate code, talk to the kid, or design challenges — but it owns all data flow between agents. These responsibilities are implicit in the agent prompts but documented here as the canonical reference.
 
-- **Message routing:** kid chat → chat agent (with world context + learner state) → optionally code agent (with concept constraints + code_style) → challenge agent (async)
-- **Challenge state machine:** holds kishōtenketsu beats, evaluates triggers, dispatches one beat at a time to chat agent, handles abort conditions
-- **Skill library filtering:** filters by kid's concept level before passing to code agent
-- **World state assembly:** packages bridge events into JSON for agents, detects activity patterns (building/mining/idle)
-- **Learner model updates:** processes events synchronously (<100ms) before next agent call
-- **AI models:** Haiku for chat, Sonnet for code, Opus for challenges (configured in orchestrator.py)
+### Message Routing
+
+When a kid's chat message arrives:
+1. Route to **chat agent** with world context and learner model state → chat agent produces a chat response and (optionally) a task description.
+2. If task description produced, attach **code_style** from the active challenge directive (or default `"compound"`) and **concept level constraints** from the learner model. Route the enriched task to the **code agent**.
+3. Route to **challenge agent** asynchronously with world context, learner model, and concept readiness. Challenge agent may produce a new challenge situation or update nothing.
+
+### Challenge Directive Dispatch
+
+The challenge agent produces a full challenge situation (all four kishōtenketsu beats with triggers, signals, and abort conditions). The orchestrator holds this state machine and dispatches individual beat directives to the chat agent as trigger conditions are met. The chat agent sees one beat at a time (`active_beat`, `bot_behavior`, `constraints`) — never the full arc.
+
+Trigger evaluation is the orchestrator's job. It observes world state changes, learner model events (emitted by the chat agent), and chat messages, then matches them against the current beat's trigger condition. When a trigger fires, it sends the next beat's directive to the chat agent.
+
+When an abort condition fires, the orchestrator retires the challenge and clears the active directive. No explicit handshake with the chat agent is needed — the absence of a directive returns the chat agent to default behavior.
+
+### Skill Library Filtering
+
+Before passing the skill library to the code agent, the orchestrator filters it by the kid's current concept level. Only skills whose `concepts` array is a subset of the current permitted set are included. The code agent receives a pre-filtered list and does not need to check concept levels on skills.
+
+### World State Observation
+
+The orchestrator assembles world context from Mineflayer bridge events (block changes, entity positions, time of day, game mode) and code panel events (code inspected, code modified, code re-run). It packages these into the JSON structures that the chat agent and challenge agent consume. The orchestrator is responsible for detecting player activity patterns ("building," "mining," "crafting") from raw block/inventory change events.
+
+### Learner Model Updates
+
+Learner model events emitted by the chat agent are processed by the learner model (rule-based or BKT). The orchestrator passes the updated learner state to both the chat agent and challenge agent on their next invocation. The learner model is synchronous (<100ms) and updates before the next agent call.
 
 ## Development Methodology
 
@@ -106,9 +69,18 @@ This project follows the Cherny fleet pattern for agent-driven development.
 
 Use plan mode (`shift+tab`) for any task touching design, architecture, or system prompts. Iterate on the plan until it's solid. Only then switch to implementation. The highest-leverage artifacts in this project are system prompts and design docs — getting those right matters more than getting code written fast.
 
-### Parallel Worktrees for Independent Work
+### Parallel Worktrees for Independent Layers
 
-Use separate worktrees for independent changes. The six layers (bridge, SDK, code panel, skill library, AST validator, learner model) have minimal interdependencies.
+The system has several layers with zero interdependencies that should be built concurrently:
+
+- **Mineflayer bridge** (Node.js WebSocket server) — independent
+- **Python SDK** (`golem.py`) — depends on bridge protocol, not bridge implementation
+- **Code panel web UI** — independent (consumes WebSocket events)
+- **Skill library** — independent (JSON storage + semantic search)
+- **AST validator** — independent (pure Python, no external deps)
+- **Learner model** — independent (event log + state machine)
+
+Use separate worktrees. Don't serialize work that can parallelize.
 
 ### Verification on Every Output
 
@@ -154,7 +126,7 @@ When you discover something — a Mineflayer quirk, a prompt pattern that works,
 - Panels: current code (syntax highlighted), skill library browser, execution log.
 - Code must be editable at Phase 3+ (kid modifies code before re-running).
 
-### File Organization
+### File Organization (Target)
 
 ```
 silicon-golem/
