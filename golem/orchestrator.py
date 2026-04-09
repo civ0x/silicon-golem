@@ -8,12 +8,30 @@ generate code, talk to the kid, or design challenges.
 import asyncio
 import json
 import logging
+import os
 import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+
+def _load_dotenv() -> None:
+    """Load .env file from project root into os.environ (stdlib only)."""
+    env_path = Path(__file__).resolve().parent.parent / ".env"
+    if not env_path.is_file():
+        return
+    with open(env_path) as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            os.environ.setdefault(key.strip(), value.strip())
+
+
+_load_dotenv()
 
 import anthropic
 
@@ -338,7 +356,25 @@ class Orchestrator:
             await self._narrate_result(result, world_ctx)
             return
 
+        # Push code to the code panel before execution
+        conn = get_connection()
+        await asyncio.to_thread(
+            conn.send_event, "code_display", {"code": code}
+        )
+
+        await asyncio.to_thread(
+            conn.send_event, "execution_start", {"code": code}
+        )
+
         result = await self._execute_code(code)
+
+        await asyncio.to_thread(
+            conn.send_event, "execution_complete", {
+                "status": result.status,
+                "code": result.code_shown,
+                "time": result.execution_time_seconds,
+            }
+        )
 
         if result.status in ("success", "partial"):
             self._learner.process_code_displayed(code)

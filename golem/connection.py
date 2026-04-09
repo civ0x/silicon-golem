@@ -139,6 +139,13 @@ class BridgeConnection:
         except Exception as e:
             raise GolemError(f"Command failed: {e}", code="COMMAND_FAILED")
 
+    def send_event(self, event: str, data: dict[str, Any] | None = None) -> None:
+        """Send an event message through the bridge (broadcast to all clients)."""
+        if self._loop is None or self._ws is None:
+            raise GolemError("Not connected to bridge", code="NOT_CONNECTED")
+        msg = json.dumps({"type": "event", "event": event, "data": data or {}})
+        asyncio.run_coroutine_threadsafe(self._ws.send(msg), self._loop).result(timeout=5)
+
     def set_event_callback(self, callback: Callable[[dict], None] | None) -> None:
         """Set a callback for unsolicited events (player_chat, block_placed, etc.)."""
         self._event_callback = callback

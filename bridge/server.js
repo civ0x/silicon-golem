@@ -162,8 +162,11 @@ function startWebSocketServer() {
       }
 
       if (msg.type !== 'command') {
-        // Relay code panel events from web UI through to all clients
-        if (msg.type === 'event' && ['code_panel_edit', 'code_panel_run', 'code_panel_scroll'].includes(msg.event)) {
+        // Relay events between clients (orchestrator ↔ code panel)
+        if (msg.type === 'event' && [
+          'code_panel_edit', 'code_panel_run', 'code_panel_scroll',
+          'code_display', 'execution_start', 'execution_complete', 'skills_list'
+        ].includes(msg.event)) {
           broadcast(msg);
         }
         return;
