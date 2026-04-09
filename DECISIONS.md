@@ -228,3 +228,43 @@ Not building for v1. The chat-first interface with visible code is the core inte
 - Minecraft Education Edition's Code Builder (MakeCode/Blockly → JavaScript → Python)
 - The "Scratch ceiling" literature on block-to-text transitions
 - Alrubaye et al. (2019): hybrid viewing (blocks + text side by side) improved transfer by >30%
+
+---
+
+## ADR-008: Curiosity Bridge — Bot-Initiated Code Nudges
+
+**Status:** Accepted
+**Date:** 2026-04-09
+
+### Context
+
+First live smoke test revealed that showing code in a side panel is necessary but not sufficient. The code panel displays generated Python, but nothing bridges the gap between "code exists on screen" and "kid engages with code." The kid has to independently notice the code, understand it's editable, and spot something worth changing. That's too many unguided steps.
+
+### Decision
+
+The chat agent occasionally mentions a specific modifiable value from the generated code after successful execution. The mention is framed as the golem noticing something about its own internals — consistent with the personality (curious about its own code, doesn't fully understand it).
+
+**Frequency:** Roughly 1 in 3 successful commands. More often when the kid hasn't touched the code yet. Backs off after the kid's first modification (the bridge has served its purpose). Never during active challenge directives.
+
+**Tone examples:**
+- "I used cobblestone for that. I think you can swap it to something else in my code if you want."
+- "That wall's 5 blocks tall — I bet that number's in my code somewhere."
+- "I put 'oak_planks' in there. Wonder what happens if you change it to something else."
+
+**Constraints:**
+- Never names code constructs ("variable", "parameter", "line 3")
+- Never frames it as a task ("try changing...", "see if you can...")
+- Never uses "code panel" — says "my code" or "that code thing"
+- The nudge is an invitation, not an assignment
+
+### Rationale
+
+The GOLEM_SDK.md design assumes the kid transitions naturally from Director (gives commands) to Modifier (changes values in code). But the first smoke test showed the transition requires a catalyst — the kid needs a reason to look at the code and a hint that it's touchable. The bot mentioning a specific value ("I used cobblestone") makes the value salient and the phrase "you can swap it" establishes editability.
+
+This is distinct from the challenge engine's role. Challenges manufacture situations where specific concepts become useful. The curiosity bridge is simpler — it just makes the code panel feel relevant before the challenge engine ever activates. It's the difference between "here's a puzzle to solve" (challenge) and "hey, that thing over there is interesting" (curiosity bridge).
+
+### Revisit Triggers
+
+- If playtesting shows the nudges feel repetitive or teacher-like, reduce frequency or revise tone
+- If kids engage with code without nudges, the bridge may be unnecessary — remove to reduce chat noise
+- If kids never engage despite nudges, the problem may be deeper (code panel placement, code readability, developmental readiness) and the bridge alone won't fix it
