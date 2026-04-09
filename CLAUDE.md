@@ -54,18 +54,21 @@ Open `panel/index.html` in a browser. No build step. Connects to bridge WebSocke
 | `BOT_NAME` | bridge | `Golem` | Bot's Minecraft username |
 | `INTEGRATION_PLAYER` | integration tests | (required) | Player name to track |
 
-### Full System Startup (for smoke testing)
+### Full System Startup
 
-1. Start Minecraft Java Edition 1.20.4, open to LAN
-2. `cd bridge && npm start` — bot joins the world
-3. Start orchestrator (no standalone entry point yet — needs `__main__.py`)
-4. Open `panel/index.html` in browser
+1. Start Minecraft Java Edition 1.20.4, open to LAN, note the port from chat
+2. Run: `./start.sh <mc_port> <player_name>` (starts bridge, orchestrator, opens code panel)
+
+Or manually:
+1. `MC_PORT=<port> cd bridge && npm start` — bot joins the world
+2. `python -m golem --player <name> -v` — orchestrator connects to bridge
+3. `open panel/index.html` — code panel in browser
 
 ## Read These First
 
 Before working on any task, read the relevant design docs:
 
-- **DECISIONS.md** — Accepted architectural decisions (ADR-001 through ADR-007). These are binding constraints. Don't contradict them without explicit discussion.
+- **DECISIONS.md** — Accepted architectural decisions (ADR-001 through ADR-008). These are binding constraints. Don't contradict them without explicit discussion.
 - **GOLEM_SDK.md** — The Python API surface the kid sees. Defines SDK functions, concept allowlists per level, generated code patterns, and a full challenge scenario walkthrough. This is the keystone artifact — code generation, AST validation, and challenge design all derive from it.
 - **BRIDGE_PROTOCOL.md** — WebSocket message protocol between Python orchestrator and Mineflayer bridge.
 - **LEARNER_MODEL.md** — BKT model spec, concept registry, learner event taxonomy.
